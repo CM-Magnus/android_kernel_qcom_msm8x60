@@ -324,7 +324,9 @@ static void voip_process_ul_pkt(uint8_t *voc_pkt,
 		snd_pcm_period_elapsed(prtd->capture_substream);
 	} else {
 		spin_unlock_irqrestore(&prtd->dsp_ul_lock, dsp_flags);
+#if !defined(CONFIG_PANTECH_SND) // LS1@SND : reset occurs due to too many log during the VT
 		pr_err("UL data dropped\n");
+#endif
 	}
 
 	wake_up(&prtd->out_wait);
@@ -401,7 +403,9 @@ static void voip_process_dl_pkt(uint8_t *voc_pkt,
 	} else {
 		*pkt_len = 0;
 		spin_unlock_irqrestore(&prtd->dsp_lock, dsp_flags);
+#if !defined(CONFIG_PANTECH_SND) // LS1@SND : reset occurs due to too many log during the VT
 		pr_err("DL data not available\n");
+#endif
 	}
 	wake_up(&prtd->in_wait);
 }
@@ -611,7 +615,9 @@ static int msm_pcm_capture_copy(struct snd_pcm_substream *substream,
 
 
 	} else if (ret == 0) {
+#if !defined(CONFIG_PANTECH_SND) // LS1@SND : reset occurs due to too many log during the VT
 		pr_err("%s: No UL data available\n", __func__);
+#endif
 		ret = -ETIMEDOUT;
 	} else {
 		pr_err("%s: Read was interrupted\n", __func__);
