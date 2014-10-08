@@ -799,8 +799,11 @@ void l2cap_send_disconn_req(struct l2cap_conn *conn, struct sock *sk, int err)
 {
 	struct l2cap_disconn_req req;
 
-	if (!conn)
+	//20121017 P12116_BT_SYSTEM stability issue QCT patch ++++
+	//if (!conn)
+	if (!conn || !conn->hcon) 
 		return;
+	//20121017 P12116_BT_SYSTEM stability issue QCT patch ++++
 
 	sk->sk_send_head = NULL;
 	skb_queue_purge(TX_QUEUE(sk));

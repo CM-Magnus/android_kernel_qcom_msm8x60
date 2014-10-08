@@ -46,6 +46,11 @@
 #include <net/bluetooth/hci_core.h>
 #include <net/bluetooth/l2cap.h>
 
+#ifndef FALSE
+#define FALSE 0
+#define TRUE (!FALSE)
+#endif
+
 struct hci_conn *hci_le_connect(struct hci_dev *hdev, __u16 pkt_type,
 				bdaddr_t *dst, __u8 sec_level, __u8 auth_type,
 				struct bt_le_params *le_params)
