@@ -1019,6 +1019,9 @@ void mipi_dsi_controller_cfg(int enable)
 void mipi_dsi_op_mode_config(int mode)
 {
 
+#if defined(CONFIG_MACH_MSM8960_SIRIUSLTE) || defined(CONFIG_MACH_MSM8960_VEGAPVW) || defined(CONFIG_MACH_MSM8960_MAGNUS)
+	uint32 data;
+#endif
 	uint32 dsi_ctrl, intr_ctrl;
 
 	dsi_ctrl = MIPI_INP(MIPI_DSI_BASE + 0x0000);
@@ -1033,6 +1036,21 @@ void mipi_dsi_op_mode_config(int mode)
 	}
 
 	pr_debug("%s: dsi_ctrl=%x intr=%x\n", __func__, dsi_ctrl, intr_ctrl);
+
+#if defined(CONFIG_MACH_MSM8960_SIRIUSLTE) || defined(CONFIG_MACH_MSM8960_VEGAPVW) || defined(CONFIG_MACH_MSM8960_MAGNUS)
+	//set BLLP_POWER_STOP
+	if(mode == DSI_VIDEO_MODE)
+	{
+		data = MIPI_INP(MIPI_DSI_BASE + 0x000c);
+		data |= BIT(12); // BLLP_POWER_STOP 
+		MIPI_OUTP(MIPI_DSI_BASE + 0x000c, data); 
+	}else
+	{
+		data = MIPI_INP(MIPI_DSI_BASE + 0x000c);
+		data &= ~BIT(12); // BLLP_POWER_STOP 
+		MIPI_OUTP(MIPI_DSI_BASE + 0x000c, data); 
+	}
+#endif
 
 	MIPI_OUTP(MIPI_DSI_BASE + 0x010c, intr_ctrl); /* DSI_INTL_CTRL */
 	MIPI_OUTP(MIPI_DSI_BASE + 0x0000, dsi_ctrl);
@@ -1465,7 +1483,13 @@ int mipi_dsi_cmd_dma_tx(struct dsi_buf *tp)
 	wmb();
 	spin_unlock_irqrestore(&dsi_mdp_lock, flags);
 
+	/* LCD shinjg */
+#ifdef CONFIG_F_SKYDISP_LCD_DMA_TIMEOUT
+//	wait_for_completion_timeout(&dsi_dma_comp, 30UL); // 10 -> 5 flick cursor
+	wait_for_completion_timeout(&dsi_dma_comp, msecs_to_jiffies(80)); // 10 -> 5 flick cursor
+#else
 	wait_for_completion(&dsi_dma_comp);
+#endif
 
 	dma_unmap_single(&dsi_dev, tp->dmap, tp->len, DMA_TO_DEVICE);
 	tp->dmap = 0;

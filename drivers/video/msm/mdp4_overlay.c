@@ -42,6 +42,9 @@
 #include "msm_fb.h"
 #include "mdp4.h"
 
+/*video play rotate lockup CASE #01034021*/
+#define FEATURE_QUALCOMM_BUG_FIX_WRITEBACK_LOCKUP
+
 #define VERSION_KEY_MASK	0xFFFFFF00
 
 struct mdp4_overlay_ctrl {
@@ -1980,8 +1983,10 @@ void mdp4_overlay_borderfill_stage_up(struct mdp4_overlay_pipe *pipe)
 		mdp4_dsi_cmd_base_swap(0, pipe);
 	else if (ctrl->panel_mode & MDP4_PANEL_LCDC)
 		mdp4_lcdc_base_swap(0, pipe);
+#ifdef CONFIG_FB_MSM_DTV
 	else if (ctrl->panel_mode & MDP4_PANEL_DTV)
 		mdp4_dtv_base_swap(0, pipe);
+#endif
 
 	mdp4_overlay_reg_flush(bspipe, 1);
 	/* borderfill pipe as base layer */
@@ -2037,8 +2042,10 @@ void mdp4_overlay_borderfill_stage_down(struct mdp4_overlay_pipe *pipe)
 		mdp4_dsi_cmd_base_swap(0, bspipe);
 	else if (ctrl->panel_mode & MDP4_PANEL_LCDC)
 		mdp4_lcdc_base_swap(0, bspipe);
+#ifdef CONFIG_FB_MSM_DTV	
 	else if (ctrl->panel_mode & MDP4_PANEL_DTV)
 		mdp4_dtv_base_swap(0, bspipe);
+#endif
 
 	/* free borderfill pipe */
 	mdp4_overlay_reg_flush(pipe, 1);
@@ -3568,6 +3575,20 @@ int mdp4_overlay_set(struct fb_info *info, struct mdp_overlay *req)
 		mdp4_map_sec_resource(mfd);
 	}
 
+#ifdef FEATURE_QUALCOMM_BUG_FIX_WRITEBACK_LOCKUP
+    //UI blt mode cover up 
+	 mdp4_calc_pipe_mdp_clk(mfd, pipe);
+
+    if(pipe->mixer_num == MDP4_MIXER0 && pipe->req_clk > mdp_max_clk && OVERLAY_TYPE_RGB == mdp4_overlay_format2type(pipe->src_format)) {
+        pr_debug("%s UI blt case, can't compose with MDP directly.\n", __func__);
+			 	 if(req->id == MSMFB_NEW_REQUEST)  
+			 	 mdp4_overlay_pipe_free(pipe);
+
+		 		 mutex_unlock(&mfd->dma->ov_mutex);
+		 	 return -EINVAL;
+		 }
+#endif
+
 	/* return id back to user */
 	req->id = pipe->pipe_ndx;	/* pipe_ndx start from 1 */
 	pipe->req_data = *req;		/* keep original req */
@@ -3598,6 +3619,14 @@ int mdp4_overlay_set(struct fb_info *info, struct mdp_overlay *req)
 		fill_black_screen(FALSE, pipe->pipe_num, pipe->mixer_num);
 
 	mdp4_overlay_mdp_pipe_req(pipe, mfd);
+
+ //video blt mode cover up 
+ #ifdef FEATURE_QUALCOMM_BUG_FIX_WRITEBACK_LOCKUP
+	 if(pipe->mixer_num == MDP4_MIXER0 && pipe->req_clk > mdp_max_clk && OVERLAY_TYPE_VIDEO == mdp4_overlay_format2type(pipe->src_format)) { 
+        pr_debug("%s video blt case\n", __func__);
+		 pipe->req_clk = mdp_max_clk; 
+ } 
+#endif 
 
 	mutex_unlock(&mfd->dma->ov_mutex);
 
@@ -3959,8 +3988,10 @@ int mdp4_overlay_play(struct fb_info *info, struct msmfb_overlay_data *req)
 			mdp4_lcdc_pipe_queue(0, pipe);
 		}
 	} else if (pipe->mixer_num == MDP4_MIXER1) {
+#ifdef CONFIG_FB_MSM_DTV  // 20120905 jylee
 		if (ctrl->panel_mode & MDP4_PANEL_DTV)
 			mdp4_dtv_pipe_queue(0, pipe);/* cndx = 0 */
+#endif
 	} else if (pipe->mixer_num == MDP4_MIXER2) {
 		ctrl->mixer2_played++;
 		if (ctrl->panel_mode & MDP4_PANEL_WRITEBACK)

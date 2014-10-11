@@ -54,12 +54,33 @@
 #include "mdp.h"
 #include "mdp4.h"
 
+#define CONFIG_SKY_FIX_BACKLIGHT_FOR_ON_DIMMING  // p13447 workaround 12.0531
+//#define CONFIG_SKY_FIX_BACKLIGHT_FOR_ON_DIMMING_DBG  // p13447 workaround 12.0531
+
+/* p14974 fix framework reboot in factory cmd LCD force onoff */
+#define CONFIG_SKY_FIX_RESET_LCD_FORCE_ONOFF
+
+#ifdef CONFIG_PANTECH_CHARGER_OFFLINE 
+extern uint32_t pantech_charging_status(void);
+#if defined(CONFIG_MACH_MSM8960_VEGAPVW) || defined(CONFIG_MACH_MSM8960_MAGNUS)
+int off_charger_flag = 0;
+#endif
+#define BATT_CHARGING_IN "/poweroff_in.rle"
+#endif
+
 #ifdef CONFIG_FB_MSM_TRIPLE_BUFFER
 #define MSM_FB_NUM	3
 #endif
 
 #ifdef CONFIG_HAS_EARLYSUSPEND
 #undef CONFIG_HAS_EARLYSUSPEND
+#endif
+
+#ifdef CONFIG_SKY_FIX_BACKLIGHT_FOR_ON_DIMMING
+int bl_wakeup_flag = 0; //shinbrad test
+int bl_suspend_flag = 0; //shinbrad test
+static int pre_bkl_lvl;
+static int suspend_bl;
 #endif
 
 static unsigned char *fbram;
@@ -71,6 +92,10 @@ static boolean bf_supported;
  * transients during resume.
  */
 unsigned long backlight_duration = (HZ/20);
+
+#if defined(CONFIG_MACH_MSM8960_VEGAPVW) || defined(CONFIG_MACH_MSM8960_MAGNUS) || defined(CONFIG_MACH_MSM8960_SIRIUSLTE)
+unsigned char first_boot_flags = 1; /* offline charging */
+#endif
 
 static struct platform_device *pdev_list[MSM_FB_MAX_DEV_LIST];
 static int pdev_list_cnt;
@@ -121,6 +146,7 @@ static int msm_fb_suspend_sub(struct msm_fb_data_type *mfd);
 static int msm_fb_ioctl(struct fb_info *info, unsigned int cmd,
 			unsigned long arg);
 static int msm_fb_mmap(struct fb_info *info, struct vm_area_struct * vma);
+static void msm_fb_fillrect(struct fb_info *info, const struct fb_fillrect *rect);
 static int mdp_bl_scale_config(struct msm_fb_data_type *mfd,
 						struct mdp_bl_scale_data *data);
 static void msm_fb_scale_bl(__u32 *bl_lvl);
@@ -172,6 +198,13 @@ void msm_fb_debugfs_file_create(struct dentry *root, const char *name,
 }
 #endif
 
+#ifdef CONFIG_F_SKYDISP_NO_CURSOR_IN_BOOT
+int msm_fb_cursor_dummy(struct fb_info *info, struct fb_cursor *cursor)
+{
+	return 0;
+}
+#endif
+
 int msm_fb_cursor(struct fb_info *info, struct fb_cursor *cursor)
 {
 	struct msm_fb_data_type *mfd = (struct msm_fb_data_type *)info->par;
@@ -193,6 +226,13 @@ static void msm_fb_set_bl_brightness(struct led_classdev *led_cdev,
 	struct msm_fb_data_type *mfd = dev_get_drvdata(led_cdev->dev->parent);
 	int bl_lvl;
 
+#if !defined(FEATURE_AARM_RELEASE_MODE) //not user mode
+//	printk("[%s:ENTER] led_brightness value : %d \n",__func__,value);
+	printk("[LCD]LED BL:%d\n",value);
+#else
+	printk("[LCD]BL:%d\n",value);
+#endif
+
 	if (value > MAX_BACKLIGHT_BRIGHTNESS)
 		value = MAX_BACKLIGHT_BRIGHTNESS;
 
@@ -203,6 +243,47 @@ static void msm_fb_set_bl_brightness(struct led_classdev *led_cdev,
 
 	if (!bl_lvl && value)
 		bl_lvl = 1;
+#if defined (CONFIG_MACH_MSM8960_VEGAPVW) || defined (CONFIG_MACH_MSM8960_MAGNUS)
+	if(value <= 20 && value > 0)
+		bl_lvl = 1;
+#endif	
+
+#ifdef CONFIG_SKY_FIX_BACKLIGHT_FOR_ON_DIMMING
+	if(bl_wakeup_flag == 1) //&& mfd->panel_power_on )  //shinbrad	
+	{
+
+		if(pre_bkl_lvl < bl_lvl)
+		{
+			pre_bkl_lvl = bl_lvl; 
+//#if !defined(FEATURE_AARM_RELEASE_MODE) //not user mode 
+#if defined(CONFIG_SKY_FIX_BACKLIGHT_FOR_ON_DIMMING_DBG)
+			printk("[shinbrad:%s] Run Wakeup BL value...[org:%d:bl_lvl%d]\n",__func__,value,pre_bkl_lvl);
+#endif
+//#else
+//			printk("Wake BL...[org:%d:bl_lvl:%d, pre_blk_lvl:%d]\n",value,,bl_lvl ,pre_bkl_lvl);
+//#endif
+		}
+		#if defined(CONFIG_SKY_FIX_BACKLIGHT_FOR_ON_DIMMING_DBG)
+		
+		else
+			printk("Wake BL pass...[org:%d:bl_lvl:%d, pre_blk_lvl:%d]\n", value, bl_lvl, pre_bkl_lvl);
+#endif
+	}else if(bl_suspend_flag == 1)
+	{
+		if(suspend_bl < bl_lvl)
+		{
+			suspend_bl = bl_lvl;
+#if defined(CONFIG_SKY_FIX_BACKLIGHT_FOR_ON_DIMMING_DBG)
+			printk("suspend BL ..[org:%d:bl_lvl%d]\n", value, bl_lvl);
+#endif
+		}
+#if defined(CONFIG_SKY_FIX_BACKLIGHT_FOR_ON_DIMMING_DBG)
+		else
+			printk("suspend BL pass...[org:%d:bl_lvl%d]\n", value, bl_lvl);
+#endif
+	}
+#endif
+
 	down(&mfd->sem);
 	msm_fb_set_backlight(mfd, bl_lvl);
 	up(&mfd->sem);
@@ -274,6 +355,42 @@ int msm_fb_detect_client(const char *name)
 	return ret;
 }
 
+#ifdef CONFIG_F_SKYDISP_CABC_FIX
+int cabc_state;
+int cabc_state_ret;
+extern void cabc_contol(struct msm_fb_data_type *mfd, int state);
+
+static ssize_t msm_fb_cabc_store(struct device *dev, struct device_attribute *attr, 
+			const char *buf,size_t count)
+{
+	struct fb_info *fbi = dev_get_drvdata(dev);
+	struct msm_fb_data_type *mfd = (struct msm_fb_data_type *)fbi->par;
+
+	sscanf(buf, "%du", &cabc_state);
+
+	
+	if(cabc_state == true)
+		cabc_contol(mfd,true);//off
+	else if(cabc_state == false)
+		cabc_contol(mfd,false);//on
+
+	
+	return count;
+}
+static ssize_t msm_fb_cabc_show(struct device *dev,
+					  struct device_attribute *attr, char *buf)
+{
+	*buf = 0; 
+	if(cabc_state == 0)
+		cabc_state_ret =1;
+	else if(cabc_state == 1)
+		cabc_state_ret =0; //cabc bug
+	return sprintf(buf, "%d\n", cabc_state_ret);
+
+}
+
+#endif
+
 static ssize_t msm_fb_msm_fb_type(struct device *dev,
 				  struct device_attribute *attr, char *buf)
 {
@@ -328,9 +445,16 @@ static ssize_t msm_fb_msm_fb_type(struct device *dev,
 	return ret;
 }
 
+#ifdef CONFIG_F_SKYDISP_CABC_FIX
+static DEVICE_ATTR(cabc_ctl, S_IRUGO | S_IWUSR, msm_fb_cabc_show, msm_fb_cabc_store);
+#endif
+
 static DEVICE_ATTR(msm_fb_type, S_IRUGO, msm_fb_msm_fb_type, NULL);
 static struct attribute *msm_fb_attrs[] = {
 	&dev_attr_msm_fb_type.attr,
+#ifdef CONFIG_F_SKYDISP_CABC_FIX
+	&dev_attr_cabc_ctl.attr,
+#endif
 	NULL,
 };
 static struct attribute_group msm_fb_attr_group = {
@@ -407,7 +531,19 @@ static int msm_fb_probe(struct platform_device *pdev)
 
 	vsync_cntrl.dev = mfd->fbi->dev;
 	mfd->panel_info.frame_count = 0;
+#if defined(CONFIG_MACH_MSM8960_SIRIUSLTE) || defined (CONFIG_MACH_MSM8960_VEGAPVW) || defined (CONFIG_MACH_MSM8960_MAGNUS)
+#ifdef CONFIG_PANTECH_CHARGER_OFFLINE 
+        if(pantech_charging_status()) {
+	    mfd->bl_level = 1;
+#if  defined (CONFIG_MACH_MSM8960_VEGAPVW) || defined (CONFIG_MACH_MSM8960_MAGNUS) 
+	   off_charger_flag = 1; 
+#endif             
+        }else
+#endif             
+    mfd->bl_level = 6;   
+#else
 	mfd->bl_level = 0;
+#endif
 	bl_scale = 1024;
 	bl_min_lvl = 255;
 #ifdef CONFIG_FB_MSM_OVERLAY
@@ -559,6 +695,10 @@ static int msm_fb_suspend_sub(struct msm_fb_data_type *mfd)
 	if ((!mfd) || (mfd->key != MFD_KEY))
 		return 0;
 
+#ifdef CONFIG_SKY_FIX_BACKLIGHT_FOR_ON_DIMMING
+	bl_suspend_flag = 1;
+#endif
+
 	/*
 	 * suspend this channel
 	 */
@@ -578,6 +718,9 @@ static int msm_fb_suspend_sub(struct msm_fb_data_type *mfd)
 		}
 		mfd->op_enable = FALSE;
 	}
+#ifdef CONFIG_SKY_FIX_BACKLIGHT_FOR_ON_DIMMING
+	printk("[%s] shinbrad test display suspend off ************************\n",__func__);
+#endif
 	/*
 	 * try to power down
 	 */
@@ -819,6 +962,13 @@ static void msmfb_early_resume(struct early_suspend *h)
 		}
 	}
 
+#ifdef CONFIG_SKY_FIX_BACKLIGHT_FOR_ON_DIMMING
+	bl_wakeup_flag = 1;  //shinbrad	
+#if defined(CONFIG_SKY_FIX_BACKLIGHT_FOR_ON_DIMMING_DBG)
+	printk("[LCD] Start Wakeup BL value...\n");
+#endif
+#endif
+
 	msm_fb_resume_sub(mfd);
 }
 #endif
@@ -866,10 +1016,12 @@ void msm_fb_set_backlight(struct msm_fb_data_type *mfd, __u32 bkl_lvl)
 {
 	struct msm_fb_panel_data *pdata;
 	__u32 temp = bkl_lvl;
-	if (!mfd->panel_power_on || !bl_updated) {
+	if (!mfd->panel_power_on || !bl_updated) {      //20120702_ejkim_EF44S_PLM3232_FIX
+	//if (!mfd->panel_power_on && !bl_updated) {
 		unset_bl_level = bkl_lvl;
 		return;
 	} else {
+		if(!mfd->panel_power_on) /* 20130506 p13447 shinjg for backlight bug */
 		unset_bl_level = 0;
 	}
 
@@ -887,6 +1039,155 @@ void msm_fb_set_backlight(struct msm_fb_data_type *mfd, __u32 bkl_lvl)
 	}
 }
 
+#ifdef CONFIG_F_SKYDISP_QBUG_FIX_BACKLIGHT
+static void msm_fb_set_backlight_old(struct msm_fb_data_type *mfd, __u32 bkl_lvl, u32 save)
+{
+	struct msm_fb_panel_data *pdata;
+
+
+	pdata = (struct msm_fb_panel_data *)mfd->pdev->dev.platform_data;
+#if 0 //#ifdef CONFIG_F_SKYDISP_SILENT_BOOT //silent boot p13832@shji 		
+		if(backlight_value){
+			printk("[%s] First booting = %d\n",__func__,backlight_value);
+			return;
+		}
+#endif
+	if ((pdata) && (pdata->set_backlight)) {
+		down(&mfd->sem);
+		if ((bkl_lvl != mfd->bl_level) || (!save)) {
+			u32 old_lvl;
+
+			old_lvl = mfd->bl_level;
+			mfd->bl_level = bkl_lvl;
+
+//			if (mfd->panel_power_on) {
+			pdata->set_backlight(mfd);
+#if !defined(FEATURE_AARM_RELEASE_MODE) //not user mode
+				printk("BL(old)=%d\n",mfd->bl_level);
+#else
+				printk("BL(old)=%d\n",mfd->bl_level);
+#endif
+
+			if (!save)
+				{
+				mfd->bl_level = old_lvl;
+#if !defined(FEATURE_AARM_RELEASE_MODE) //not user mode
+					printk("BL(save)=%d\n",old_lvl);
+#else
+					printk("BL(save)=%d\n",old_lvl);
+#endif
+				}
+		}
+		up(&mfd->sem);
+	}
+}
+#endif
+
+#if defined(CONFIG_F_SKYDISP_LCD_FORCE_ONOFF)
+enum {		/* mipi dsi panel */
+	DSI_VIDEO_MODE,
+	DSI_CMD_MODE,
+}; // from mipi_dsi.h
+#if defined(CONFIG_PANTECH_LCD_POWEROFFSEQ_ON_PHONEOFF) /* p13447 shinjg */
+struct msm_fb_data_type *mfd_tmp = NULL;
+
+void msm_fb_panel_power_off(void)
+{
+//	struct msm_panel_info *panel_info;
+	struct msm_fb_data_type *mfd;
+
+	if(mfd_tmp != NULL)
+	{
+	mfd = (struct msm_fb_data_type*)mfd_tmp;
+//	panel_info = &mfd->panel_info;
+	
+		if (mfd->panel_power_on) {
+               // msm_fb_blank_sub(FB_BLANK_POWERDOWN, info, mfd->op_enable);
+		printk("Panel Power Off In!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!\n"); 
+			if(mfd)
+                msm_fb_blank_sub(FB_BLANK_POWERDOWN, mfd->fbi, mfd->op_enable);
+		}else
+			printk("Not Entry ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~!\n"); 
+	}
+	
+}
+#endif
+/* just force lcd on/off, no backlight control */
+static int msm_fb_blank_sub_force(int onoff, struct fb_info *info, int bl)
+{
+	struct msm_fb_data_type *mfd = (struct msm_fb_data_type *)info->par;
+	struct msm_fb_panel_data *pdata = NULL;
+	int ret = 0;
+
+	pdata = (struct msm_fb_panel_data *)mfd->pdev->dev.platform_data;
+	if ((!pdata) || (!pdata->on) || (!pdata->off)) {
+		printk(KERN_ERR "msm_fb_blank_sub_force: no panel operation detected!\n");
+		return -ENODEV;
+	}
+
+	printk(" msm_fb_blank_sub_force: onoff=%d, mfd->panel_power_on=%d\n",
+			onoff, mfd->panel_power_on);
+	if (onoff) {
+		if (!mfd->panel_power_on) {
+#ifdef CONFIG_SKY_FIX_RESET_LCD_FORCE_ONOFF			
+			msleep(16);
+			ret = pdata->on(mfd->pdev);
+			if (ret == 0) {
+				mfd->panel_power_on = TRUE;
+				msleep(16);
+				if (bl == 1) {
+					msm_fb_set_backlight_old(mfd, mfd->bl_level, 0);
+#ifdef CONFIG_SKY_FIX_BACKLIGHT_FOR_ON_DIMMING
+		        		msm_fb_pan_display(&info->var, info);
+#endif
+				}
+			}
+#else
+		struct msm_panel_info *panel_info = &mfd->panel_info;
+		msm_fb_blank_sub(FB_BLANK_UNBLANK, info, mfd->op_enable);
+			if (panel_info->mipi.mode == DSI_VIDEO_MODE)
+				mdp4_dsi_video_overlay(mfd);
+			else
+				mdp4_dsi_cmd_overlay(mfd);
+#ifdef CONFIG_F_SKYDISP_QBUG_FIX_BACKLIGHT
+               msm_fb_set_backlight_old(mfd, mfd->bl_level, 0);
+#else
+				msm_fb_set_backlight(mfd, mfd->bl_level);
+#endif	
+#endif
+		}
+	} else {
+		if (mfd->panel_power_on) {
+#ifdef CONFIG_SKY_FIX_RESET_LCD_FORCE_ONOFF			
+			int curr_pwr_state;
+
+			//mfd->op_enable = FALSE;
+			curr_pwr_state = mfd->panel_power_on;
+			mfd->panel_power_on = FALSE;
+
+			if (bl == 1) {
+				msm_fb_set_backlight_old(mfd, 0, 0);
+			}
+			msleep(16);
+			ret = pdata->off(mfd->pdev);
+			if (ret)
+				mfd->panel_power_on = curr_pwr_state;
+
+			//mfd->op_enable = TRUE;
+#else		
+		msm_fb_blank_sub(FB_BLANK_POWERDOWN, info, mfd->op_enable);
+#ifdef CONFIG_F_SKYDISP_QBUG_FIX_BACKLIGHT
+             msm_fb_set_backlight_old(mfd, 0, 0);
+#else
+              msm_fb_set_backlight(mfd, 0);
+#endif
+#endif
+        }
+    }
+	return ret;
+}
+#endif
+
 static int msm_fb_blank_sub(int blank_mode, struct fb_info *info,
 			    boolean op_enable)
 {
@@ -900,14 +1201,61 @@ static int msm_fb_blank_sub(int blank_mode, struct fb_info *info,
 		return -ENODEV;
 	}
 
+	printk(KERN_INFO " msm_fb_blank_sub[%d]: blank_mode=%d, mfd->panel_power_on=%d\n",mfd->index,			
+			blank_mode, mfd->panel_power_on);
+#if defined(CONFIG_MACH_MSM8960_MAGNUS) || defined(CONFIG_MACH_MSM8960_SIRIUSLTE) || defined(CONFIG_MACH_MSM8960_VEGAPVW) 
+	if (first_boot_flags) 
+	{
+	     bl_updated = 1;
+	     msm_fb_set_backlight(mfd, mfd->bl_level);
+	     bl_updated = 0;
+     	     if(pantech_charging_status()) 
+                unset_bl_level =1;
+     	     else
+	        unset_bl_level =5; 
+
+	     first_boot_flags = 0;
+	}
+#endif
+
 	switch (blank_mode) {
 	case FB_BLANK_UNBLANK:
 		if (!mfd->panel_power_on) {
+#ifdef CONFIG_SKY_FIX_BACKLIGHT_FOR_ON_DIMMING
+		if( bl_suspend_flag == 1)
+			 bl_suspend_flag = 0;		
+#endif
 			msleep(16);
+#if defined(CONFIG_PANTECH_LCD_POWEROFFSEQ_ON_PHONEOFF)
+			if(mfd->index == 0) 
+				mfd_tmp = (struct msm_fb_data_type *)mfd;
+#endif
 			ret = pdata->on(mfd->pdev);
 			if (ret == 0) {
 				mfd->panel_power_on = TRUE;
 				mfd->panel_driver_on = mfd->op_enable;
+#ifdef CONFIG_SKY_FIX_BACKLIGHT_FOR_ON_DIMMING
+			if(bl_wakeup_flag == 1)	
+			{
+#if defined(CONFIG_SKY_FIX_BACKLIGHT_FOR_ON_DIMMING_DBG)
+				printk("[shinbrad:%s] Before Set Wakeup BL value...[%d]\n",__func__,pre_bkl_lvl);
+#endif
+				bl_wakeup_flag = 0;
+				if(pre_bkl_lvl || suspend_bl)
+				{
+					if(suspend_bl < pre_bkl_lvl)
+						mfd->bl_level = pre_bkl_lvl;
+					else
+						mfd->bl_level = suspend_bl;
+		//			printk("[shinbrad:%s] Set Wakeup BL value...[%d]\n",__func__,mfd->bl_level);
+#if defined(CONFIG_SKY_FIX_BACKLIGHT_FOR_ON_DIMMING_DBG)
+					printk("[LCD] Set Wakeup BL value...[Set:%d susp:%d wake:%d]\n",mfd->bl_level,suspend_bl,pre_bkl_lvl);
+#endif
+					pre_bkl_lvl = 0;
+					suspend_bl = 0;
+				}
+			}
+#endif
 			}
 		}
 		break;
@@ -932,6 +1280,9 @@ static int msm_fb_blank_sub(int blank_mode, struct fb_info *info,
 			bl_updated = 0;
 
 			msleep(16);
+#ifdef CONFIG_F_SKYDISP_QBUG_FIX_BACKLIGHT
+			msm_fb_set_backlight_old(mfd, 0, 0);
+#endif 
 			ret = pdata->off(mfd->pdev);
 			if (ret)
 				mfd->panel_power_on = curr_pwr_state;
@@ -1136,7 +1487,11 @@ static struct fb_ops msm_fb_ops = {
 	.fb_release = msm_fb_release,
 	.fb_read = NULL,
 	.fb_write = NULL,
+#ifndef CONFIG_F_SKYDISP_NO_CURSOR_IN_BOOT
 	.fb_cursor = NULL,
+#else
+	.fb_cursor = msm_fb_cursor_dummy,   // lived for delete cursor
+#endif
 	.fb_check_var = msm_fb_check_var,	/* vinfo check */
 	.fb_set_par = msm_fb_set_par,	/* set the video mode according to info->var */
 	.fb_setcolreg = NULL,	/* set color register */
@@ -1194,8 +1549,13 @@ static int msm_fb_register(struct msm_fb_data_type *mfd)
 	var->grayscale = 0,	/* No graylevels */
 	var->nonstd = 0,	/* standard pixel format */
 	var->activate = FB_ACTIVATE_VBL,	/* activate it at vsync */
+#if defined(CONFIG_MACH_MSM8960_MAGNUS)
+	var->height = 105,	/* height of picture in mm */
+	var->width = 59,	/* width of picture in mm */
+#else
 	var->height = -1,	/* height of picture in mm */
 	var->width = -1,	/* width of picture in mm */
+#endif
 	var->accel_flags = 0,	/* acceleration flags */
 	var->sync = 0,	/* see FB_SYNC_* */
 	var->rotate = 0,	/* angle we rotate counter clockwise */
@@ -1528,10 +1888,115 @@ static int msm_fb_register(struct msm_fb_data_type *mfd)
 	    ("FrameBuffer[%d] %dx%d size=%d bytes is registered successfully!\n",
 	     mfd->index, fbi->var.xres, fbi->var.yres, fbi->fix.smem_len);
 
+#if defined(CONFIG_F_SKYDISP_BOOT_LOGO_IN_KERNEL) && defined(CONFIG_FB_MSM_LOGO)
+#if defined(CONFIG_MACH_MSM8960_SIRIUSLTE)
+//	{
+
+		ret = load_565rle_image(INIT_IMAGE_FILE, bf_supported); 
+		if (!ret) 
+		{
+			if(msm_fb_blank_sub(FB_BLANK_UNBLANK, fbi, true)) {
+				printk(KERN_ERR "[%s] msm_fb_register : can`t turn on display!\n",__func__);
+			}
+		}
+#elif defined(CONFIG_MACH_MSM8960_MAGNUS) /* p12281 add - magnus does not use splash screen */
+       printk("[lcd_debug] boot logo loading... ");
+		
+#ifdef CONFIG_PANTECH_DONOT_POWER_ON_HDMI_AT_FB_OPEN
+	if (mfd->index == 0)
+	{
+#endif 
+	
+#ifdef CONFIG_F_SKYDISP_SILENT_BOOT	
+	if(sky_sys_rst_is_silent_boot_mode()){ // if value is 1, silent boot
+		if(!sky_sys_rst_is_backlight_off()){// if value is 0, backlight off
+			backlight_value = 1;
+			printk(KERN_WARNING"[%s]value of sky_sys_rst_is_backlight_off = %d\n",__func__,backlight_value);
+		}
+		else{
+#if defined(CONFIG_MACH_MSM8960_EF45K) || defined(CONFIG_MACH_MSM8960_EF46L)||defined(CONFIG_MACH_MSM8960_EF47S) || defined(CONFIG_MACH_MSM8960_MAGNUS)
+			ret = load_565rle_image(INIT_IMAGE_FILE, bf_supported);
+#else
+		ret = load_565rle_image(INIT_IMAGE_FILE, bf_supported); 
+#endif
+		if (!ret) 
+		{
+			if(msm_fb_blank_sub(FB_BLANK_UNBLANK, fbi, true)) {
+				printk(KERN_ERR "[%s] msm_fb_register : can`t turn on display!\n",__func__);
+			}
+		}
+#ifdef CONFIG_MACH_MSM8960_OSCAR
+			ret = load_565rle_image(INIT_IMAGE_FILE, bf_supported);
+#endif
+			backlight_value = 0;
+			printk(KERN_WARNING"[%s]value of sky_sys_rst_is_backlight_on = %d\n",__func__,backlight_value);
+		}
+		
+	}
+	else
+#endif
+	{
+#ifdef CONFIG_PANTECH_CHARGER_OFFLINE 
+                if(pantech_charging_status()) {
+                  ret = load_565rle_image(BATT_CHARGING_IN, bf_supported); 
+#ifdef CONFIG_MACH_MSM8960_OSCAR
+				  Oscar_State.chargerFlag = true;
+#endif
+#if defined(CONFIG_MACH_MSM8960_EF45K) || defined(CONFIG_MACH_MSM8960_EF46L) ||\
+	defined (CONFIG_MACH_MSM8960_EF47S)
+				charger_flag = true;
+#endif
+				}
+                else     
+#endif   
+		ret = load_565rle_image(INIT_IMAGE_FILE, bf_supported);
+		if (!ret) 
+		{
+			if(msm_fb_blank_sub(FB_BLANK_UNBLANK, fbi, true)) {
+				printk(KERN_ERR "[%s] msm_fb_register : can`t turn on display!\n",__func__);
+			}
+#ifdef CONFIG_MACH_MSM8960_OSCAR
+				  if(Oscar_State.chargerFlag == 1)
+				  	ret = load_565rle_image(BATT_CHARGING_IN, bf_supported); 
+				  else
+				  	ret = load_565rle_image(INIT_IMAGE_FILE, bf_supported);
+#endif
+			
+			
+		}
+#ifdef CONFIG_F_SKYDISP_SILENT_BOOT	
+				backlight_value = 0;
+#endif
+	}
+#if defined (CONFIG_MACH_MSM8960_OSCAR) 		
+	mdp_set_dma_pan_info(fbi, NULL, TRUE);
+    mdp_dma_pan_update(fbi);
+#endif
+
+	if (panel_info->mipi.mode == DSI_VIDEO_MODE)
+		mdp4_dsi_video_overlay(mfd);
+	else
+		mdp4_dsi_cmd_overlay(mfd);
+
+//20130123_ejkim_recovery_image_display
+	bl_updated = 1;
+	msm_fb_set_backlight(mfd, mfd->bl_level);
+	bl_updated = 0;
+	       if(pantech_charging_status()) 
+	            unset_bl_level =1;
+	       else
+		     unset_bl_level =5; 
+		   
+#ifdef CONFIG_PANTECH_DONOT_POWER_ON_HDMI_AT_FB_OPEN
+	}
+#endif
+#endif  /* p12281 add - magnus does not use splash screen */
+#else
 #ifdef CONFIG_FB_MSM_LOGO
 	/* Flip buffer */
 	if (!load_565rle_image(INIT_IMAGE_FILE, bf_supported))
 		;
+#endif
 #endif
 	ret = 0;
 

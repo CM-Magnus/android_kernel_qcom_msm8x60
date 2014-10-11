@@ -2313,6 +2313,9 @@ static int mdp_off(struct platform_device *pdev)
 	struct msm_fb_data_type *mfd = platform_get_drvdata(pdev);
 
 	pr_debug("%s:+\n", __func__);
+#if defined(CONFIG_MACH_MSM8960_MAGNUS)
+	ret = panel_next_off(pdev);
+#endif
 	mdp_histogram_ctrl_all(FALSE);
 	atomic_set(&vsync_cntrl.suspend, 1);
 	atomic_set(&vsync_cntrl.vsync_resume, 0);
@@ -2335,7 +2338,9 @@ static int mdp_off(struct platform_device *pdev)
 		mdp4_overlay_writeback_off(pdev);
 
 	mdp_pipe_ctrl(MDP_CMD_BLOCK, MDP_BLOCK_POWER_ON, FALSE);
+#if !defined(CONFIG_MACH_MSM8960_MAGNUS)
 	ret = panel_next_off(pdev);
+#endif
 	mdp_pipe_ctrl(MDP_CMD_BLOCK, MDP_BLOCK_POWER_OFF, FALSE);
 
 	mdp_clk_ctrl(0);
@@ -3184,6 +3189,13 @@ static int mdp_probe(struct platform_device *pdev)
 				     mdp_max_bw);
 #endif
 
+/* p12281 add - magnus does not use splash screen */
+#ifdef CONFIG_FB_MSM_LOGO  //KERNEL LOGO DISPLAY ejkim_add
+	if (mfd->vsync_init != NULL) {
+		mfd->vsync_init(0);			
+	}
+#endif	
+
 	/* set driver data */
 	platform_set_drvdata(msm_fb_dev, mfd);
 
@@ -3203,7 +3215,10 @@ static int mdp_probe(struct platform_device *pdev)
 	 */
 	if ((mfd->vsync_init != NULL) || (mdp_rev < MDP_REV_40)) {
 		if (mdp_rev >= MDP_REV_40)
+/* p12281 add - magnus does not use splash screen */
+#ifndef CONFIG_FB_MSM_LOGO	//KERNEL LOGO DISPLAY ejkim_add
 			mfd->vsync_init(0);
+#endif
 
 		if (!mfd->vsync_sysfs_created) {
 			mfd->dev_attr.attr.name = "vsync_event";
